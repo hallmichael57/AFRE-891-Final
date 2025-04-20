@@ -1,0 +1,207 @@
+---
+title: "AFRE-891 project"
+author: "Michael"
+date: "2025-04-15"
+output: html_document
+---
+
+1. Load packages and cluster size data set
+
+```{r}
+pacman::p_load(haven, sf, tidyverse, tmap, dplyr, maptiles)
+
+data <- read_dta("/Users/michaelhall/Desktop/school/TZ data/TZ_cleaned_data/N_cluster_size.dta")
+```
+
+
+2. Convert data to data sf
+
+```{r}
+# It turns out the gps coordinates were not recorded for some observations!
+na_long  <- sum( is.na(data$gps_longitude) )
+na_lat   <- sum( is.na(data$gps_latitude) )
+
+
+# Filter out NAs
+data_clean <- data %>%
+  filter(
+    !is.na(gps_longitude),
+    !is.na(gps_latitude)
+  )
+
+data_sf <- data_clean |>
+  st_as_sf(
+    coords = c("gps_longitude", "gps_latitude"),    
+    crs    = 4326,               
+    remove = FALSE               
+  )
+```
+
+
+3. Set CRS for Dar es Salaam, Tanzania 
+ 
+```{r}
+data_sf <- st_transform(data_sf, crs = 21037)
+```
+
+
+4. Compute cluster size (a) for 100 meters
+
+```{r}
+cluster_list <- st_is_within_distance(data_sf, data_sf, dist = 100)
+
+# Subtract 1 to exclude the vendor themselves from the cluster
+data_sf$cluster_100m <- lengths(cluster_list) - 1
+```
+
+
+5. Compute cluster size (b) and (c) for 50 and 20 meters
+
+```{r}
+cluster_list <- st_is_within_distance(data_sf, data_sf, dist = 50)
+data_sf$cluster_50m <- lengths(cluster_list) - 1
+
+cluster_list <- st_is_within_distance(data_sf, data_sf, dist = 20)
+data_sf$cluster_20m <- lengths(cluster_list) - 1
+```
+
+
+Awesome! We now have measures of clusters. Two additional tasks would be:
+
+i. Evaluate the accuracy of vendors' self-reporting
+ii. Show the clusters on a map of the city. 
+
+For i. we can compare for each vendor as well as ttest to see if the means are different
+
+```{r}
+
+# Check the names of columns and find the self-reported cluster size of SAME
+# food vendors from 2024 (the same year of GPS coordinates)
+colnames(data_sf)
+
+# Check the class of the self-reported cluster size to ensure it is numeric
+class(data_sf$cluster_size_samefood2024)
+
+# Compare the two cluster measures
+mean(data_sf$cluster_size_samefood2024 == data_sf$cluster_100m)
+
+# They are different! Only 8.7 % of vendors reported the same number of adjacent 
+# vendors as the 100 meters' calculation.
+
+# An exact number is a high bar. Let's see how many were within 4 vendors.
+mean(
+  abs(data_sf$cluster_size_samefood2024 - data_sf$cluster_100m) <= 4,
+  na.rm = TRUE
+)
+
+# Much higher! 58 % of vendors reported a cluster size of vendors within 4 of
+# the GPS calculation
+
+# Now ttest to see on the average if the two are different
+
+t.test(
+  x      = data_sf$cluster_size_samefood2024,
+  y      = data_sf$cluster_100m,
+  paired = TRUE,
+  alternative = "two.sided"
+)
+
+# The t-test suggest the two measures are not significantly different! This is
+# great news as it will add robustness to using past measures of cluster size
+# obtained via recall.
+
+```
+
+
+For ii. we begin by creating buffers
+
+```{r}
+buffers_100 <- data_sf |>
+  st_buffer(dist = 100) |>
+  mutate(radius = 100, count = cluster_100m)
+
+buffers_50 <- data_sf |>
+  st_buffer(dist = 50) |>
+  mutate(radius = 50, count = cluster_50m)
+
+buffers_20 <- data_sf |>
+  st_buffer(dist = 20) |>
+  mutate(radius = 20, count = cluster_20m)
+
+buffers_all <- bind_rows(buffers_20, buffers_50, buffers_100)
+```
+
+
+Then plot a static map.
+
+```{r}
+
+library(sf)
+library(tmap)
+
+# Compute 100 m buffer around each point
+buffers_100 <- st_buffer(data_sf, dist = 100)
+
+# Count how many points fall in each buffer
+counts <- lengths(st_intersects(buffers_100, data_sf))
+buffers_100$cluster_size <- counts
+
+# Plot with bubble size = cluster_size
+tmap_mode("plot")
+tm_basemap("OpenStreetMap") +
+  tm_shape(buffers_100) +
+   tm_bubbles(size = "cluster_size",
+             fill = "lightblue",
+             col = "darkblue",
+             lwd = 0.8,
+             fill_alpha = 0.3,
+             col_alpha = 0.5,
+          )    +
+  tm_layout(
+    frame         = FALSE,
+    inner.margins = c(0,0,0,0)
+  )
+
+
+```
+
+
+Plot an interactive map
+
+```{r}
+
+library(sf)
+library(tmap)
+
+# 1. Check data class and CRS
+print(class(buffers_100))            
+print(st_crs(buffers_100))           
+
+# Transform it to WGS 84 to get it to display properly
+buffers_100_ll <- st_transform(buffers_100, crs = 4326)
+
+# 2. Switch to interactive mode
+tmap_mode("view")
+
+# 3. Plot again with bubble size = cluster size (and play with styling)
+tm_tiles("OpenStreetMap") +
+  tm_shape(buffers_100_ll) +
+  tm_bubbles(size = "cluster_size",
+             fill = "red",
+             col = "darkred",
+             lwd = 1.2,
+             fill_alpha = 0.3,
+             col_alpha = 0.5
+             )
+
+
+```
+
+
+All done! We now have a gps-based measure of 2024 cluster size, we've shown that
+street food vendors are able to estimate their cluster within 100m with fairly 
+good accuracy, and we can two different maps to help visualize where clusters are
+largest within the city. 
+
+
+
